@@ -74,4 +74,4 @@ if __name__ == "__main__":
         keep_alive()
     except:
         pass  # Sur Render, ce module est ignoré
-    bot.run(DISCORD_BOT_TOKEN)
+    bot.run(DISCORD_TOKEN)
