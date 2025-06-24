@@ -1,137 +1,77 @@
 import os
-from dotenv import load_dotenv
+import sys
+import aiohttp
 import discord
 from discord.ext import commands
-import sys
-from discord.ext import commands, tasks
-import aiohttp
-import aiosqlite
-from config import DISCORD_BOT_TOKEN, TRN_API_KEY, REFRESH_INTERVAL_HOURS
-from keep_alive import keep_alive  # importe ta fonction keep_alive
+from dotenv import load_dotenv
+from keep_alive import keep_alive  # utile sur Replit
 
+# Debug
 print("Python version:", sys.version)
 
+# Chargement des variables d'environnement
 load_dotenv()
+DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+TRN_API_KEY = os.getenv("TRN_API_KEY")
 
+# Configuration du bot Discord
 intents = discord.Intents.default()
-intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-# ---------- DB SETUP ----------
-
-async def init_db():
-    async with aiosqlite.connect("db.sqlite3") as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS accounts (
-                user_id INTEGER PRIMARY KEY,
-                platform TEXT,
-                username TEXT,
-                last_mmr INTEGER
-            )
-        """)
-        await db.commit()
-
-# ---------- BOT EVENTS ----------
 
 @bot.event
 async def on_ready():
-    await init_db()
-    refresh_ranks.start()
     print(f"✅ Connecté en tant que {bot.user}")
 
-# ---------- API CALL ----------
-
-async def fetch_rank(platform, username):
-    url = f"https://public-api.tracker.gg/v2/rocket-league/standard/profile/{platform}/{username}"
-    headers = {"TRN-Api-Key": TRN_API_KEY}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as resp:
-            if resp.status != 200:
-                return None
-            return await resp.json()
-
-# ---------- COMMANDES ----------
+# Base de données temporaire (RAM)
+linked_accounts = {}
 
 @bot.command()
 async def link(ctx, platform: str, *, username: str):
-    async with aiosqlite.connect("db.sqlite3") as db:
-        await db.execute("""
-            INSERT OR REPLACE INTO accounts (user_id, platform, username, last_mmr)
-            VALUES (?, ?, ?, ?)
-        """, (ctx.author.id, platform, username, 0))
-        await db.commit()
-    await ctx.send(f"✅ {ctx.author.mention}, compte lié à `{username}` sur `{platform}`")
+    """Lie ton compte Rocket League (plateforme: steam, epic, psn, xbox)"""
+    linked_accounts[ctx.author.id] = (platform, username)
+    await ctx.send(f"✅ Compte lié à `{username}` sur `{platform}`")
 
 @bot.command()
 async def rank(ctx, member: discord.Member = None):
+    """Affiche les ranks Rocket League du joueur"""
     user = member or ctx.author
-    async with aiosqlite.connect("db.sqlite3") as db:
-        async with db.execute("SELECT platform, username FROM accounts WHERE user_id = ?", (user.id,)) as cursor:
-            row = await cursor.fetchone()
-            if not row:
-                return await ctx.send("❌ Aucun compte lié. Utilise `!link`")
+    if user.id not in linked_accounts:
+        return await ctx.send("❌ Aucun compte lié. Utilise `!link <plateforme> <pseudo>`")
 
-            platform, username = row
-            data = await fetch_rank(platform, username)
-            if not data:
-                return await ctx.send("⚠️ Données introuvables.")
+    platform, username = linked_accounts[user.id]
+    url = f"https://public-api.tracker.gg/v2/rocket-league/standard/profile/{platform}/{username}"
 
-            segments = data["data"]["segments"]
-            embed = discord.Embed(title=f"Ranks Rocket League de {user.display_name}", color=discord.Color.blue())
-            for s in segments:
-                if s["type"] == "playlist":
-                    name = s["metadata"]["name"]
-                    tier = s["stats"]["tier"]["metadata"]["name"]
-                    div = s["stats"]["division"]["metadata"]["name"]
-                    mmr = s["stats"]["rating"]["value"]
-                    embed.add_field(name=name, value=f"{tier} {div} ({mmr} MMR)", inline=False)
+    headers = {
+        "TRN-Api-Key": TRN_API_KEY,
+        "Accept": "application/json"
+    }
 
-            await ctx.send(embed=embed)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                return await ctx.send("❌ Impossible de récupérer les données. Vérifie ton pseudo ou la plateforme.")
 
-# ---------- RANK REFRESH AUTO ----------
+            data = await resp.json()
+            segments = data.get("data", {}).get("segments", [])
 
-@tasks.loop(hours=REFRESH_INTERVAL_HOURS)
-async def refresh_ranks():
-    async with aiosqlite.connect("db.sqlite3") as db:
-        async with db.execute("SELECT user_id, platform, username, last_mmr FROM accounts") as cursor:
-            async for user_id, platform, username, last_mmr in cursor:
-                data = await fetch_rank(platform, username)
-                if not data:
-                    continue
+            if not segments:
+                return await ctx.send("❌ Aucune donnée trouvée.")
 
-                for s in data["data"]["segments"]:
-                    if s["type"] == "playlist" and s["metadata"]["name"] == "Ranked Doubles 2v2":
-                        current_mmr = s["stats"]["rating"]["value"]
-                        if current_mmr != last_mmr:
-                            user = await bot.fetch_user(user_id)
-                            direction = "🔺 monté" if current_mmr > last_mmr else "🔻 descendu"
-                            msg = f"{user.mention} est {direction} en 2v2 : {last_mmr} → {current_mmr} MMR"
-                            channel = discord.utils.get(bot.get_all_channels(), name="rocket-league")
-                            if channel:
-                                await channel.send(msg)
-                            await db.execute("UPDATE accounts SET last_mmr = ? WHERE user_id = ?", (current_mmr, user_id))
-                            await db.commit()
+            output = f"**Ranks Rocket League de {user.display_name}**\n"
+            for segment in segments:
+                if segment["type"] == "playlist":
+                    playlist = segment["metadata"]["name"]
+                    rank = segment["stats"]["tier"]["metadata"]["name"]
+                    div = segment["stats"]["division"]["metadata"]["name"]
+                    mmr = segment["stats"]["rating"]["value"]
+                    output += f"➡️ {playlist} : **{rank} {div}** ({mmr} MMR)\n"
 
-# ---------- LEADERBOARD ----------
+            await ctx.send(output)
 
-@bot.command()
-async def leaderboard(ctx):
-    async with aiosqlite.connect("db.sqlite3") as db:
-        async with db.execute("""
-            SELECT username, last_mmr FROM accounts
-            ORDER BY last_mmr DESC LIMIT 10
-        """) as cursor:
-            rows = await cursor.fetchall()
-            if not rows:
-                return await ctx.send("Aucun joueur trouvé.")
-
-            embed = discord.Embed(title="🏆 Leaderboard Rocket League 2v2", color=discord.Color.gold())
-            for i, (username, mmr) in enumerate(rows, start=1):
-                embed.add_field(name=f"{i}. {username}", value=f"{mmr} MMR", inline=False)
-            await ctx.send(embed=embed)
-
-token = os.getenv("DISCORD_BOT_TOKEN")
-
+# Lancement du serveur + du bot
 if __name__ == "__main__":
-    keep_alive()  # démarre Flask en thread séparé pour UptimeRobot
-    bot.run(token)
+    try:
+        keep_alive()
+    except:
+        pass  # Sur Render, ce module est ignoré
+    bot.run(DISCORD_TOKEN)
