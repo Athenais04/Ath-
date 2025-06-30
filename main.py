@@ -1,77 +1,75 @@
 import os
 import sys
-import aiohttp
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
-from keep_alive import keep_alive  # utile sur Replit
+from keep_alive import keep_alive
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+import time
 
-# Debug
 print("Python version:", sys.version)
 
 # Chargement des variables d'environnement
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-TRN_API_KEY = os.getenv("TRN_API_KEY")
 
-# Configuration du bot Discord
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+linked_accounts = {}
 
 @bot.event
 async def on_ready():
     print(f"✅ Connecté en tant que {bot.user}")
 
-# Base de données temporaire (RAM)
-linked_accounts = {}
-
 @bot.command()
 async def link(ctx, platform: str, *, username: str):
-    """Lie ton compte Rocket League (plateforme: steam, epic, psn, xbox)"""
     linked_accounts[ctx.author.id] = (platform, username)
     await ctx.send(f"✅ Compte lié à `{username}` sur `{platform}`")
 
 @bot.command()
 async def rank(ctx, member: discord.Member = None):
-    """Affiche les ranks Rocket League du joueur"""
     user = member or ctx.author
     if user.id not in linked_accounts:
         return await ctx.send("❌ Aucun compte lié. Utilise `!link <plateforme> <pseudo>`")
 
     platform, username = linked_accounts[user.id]
-    url = f"https://public-api.tracker.gg/v2/rocket-league/standard/profile/{platform}/{username}"
+    url = f"https://rocketleague.tracker.network/rocket-league/profile/{platform}/{username}/overview"
 
-    headers = {
-        "TRN-Api-Key": TRN_API_KEY,
-        "Accept": "application/json"
-    }
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    
+    driver = webdriver.Chrome(options=chrome_options)
+    driver.get(url)
+    
+    time.sleep(5)  # Attend que la page charge
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as resp:
-            if resp.status != 200:
-                return await ctx.send("❌ Impossible de récupérer les données. Vérifie ton pseudo ou la plateforme.")
+    ranks = driver.find_elements(By.CLASS_NAME, 'playlist')
+    if not ranks:
+        await ctx.send("❌ Impossible de trouver les données sur la page.")
+        driver.quit()
+        return
 
-            data = await resp.json()
-            segments = data.get("data", {}).get("segments", [])
+    output = f"**Ranks Rocket League de {user.display_name}**\n"
+    for rank in ranks:
+        try:
+            playlist = rank.find_element(By.CLASS_NAME, 'playlist__name').text
+            tier = rank.find_element(By.CLASS_NAME, 'playlist__rank').text
+            mmr = rank.find_element(By.CLASS_NAME, 'playlist__rating').text
+            output += f"➡️ {playlist} : **{tier}** ({mmr})\n"
+        except:
+            continue
 
-            if not segments:
-                return await ctx.send("❌ Aucune donnée trouvée.")
+    await ctx.send(output)
+    driver.quit()
 
-            output = f"**Ranks Rocket League de {user.display_name}**\n"
-            for segment in segments:
-                if segment["type"] == "playlist":
-                    playlist = segment["metadata"]["name"]
-                    rank = segment["stats"]["tier"]["metadata"]["name"]
-                    div = segment["stats"]["division"]["metadata"]["name"]
-                    mmr = segment["stats"]["rating"]["value"]
-                    output += f"➡️ {playlist} : **{rank} {div}** ({mmr} MMR)\n"
-
-            await ctx.send(output)
-
-# Lancement du serveur + du bot
 if __name__ == "__main__":
     try:
         keep_alive()
     except:
-        pass  # Sur Render, ce module est ignoré
+        pass
     bot.run(DISCORD_TOKEN)
